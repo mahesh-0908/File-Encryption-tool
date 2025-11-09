@@ -1,0 +1,407 @@
+
+import os
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.backends import default_backend
+
+
+class FileEncryptionTool:
+    """Main class for file encryption and decryption operations."""
+
+    def __init__(self):
+        """Initialize the encryption tool."""
+        self.backend = default_backend()
+        self.private_key = None
+        self.public_key = None
+        self.generate_rsa_keys()
+
+    def generate_rsa_keys(self):
+        """Generate RSA-2048 key pair for asymmetric encryption."""
+        self.private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=self.backend
+        )
+        self.public_key = self.private_key.public_key()
+
+    def generate_aes_key(self):
+        """Generate a random 256-bit AES key."""
+        return os.urandom(32)  # 256 bits
+
+    def encrypt_file(self, file_path, output_path=None):
+        """
+        Encrypt a file using hybrid encryption (AES-256 + RSA-2048).
+
+        Args:
+            file_path: Path to the file to encrypt
+            output_path: Path for encrypted output file
+
+        Returns:
+            str: Path to encrypted file
+        """
+        try:
+            # Generate random AES key
+            aes_key = self.generate_aes_key()
+
+            # Generate random IV (Initialization Vector)
+            iv = os.urandom(16)
+
+            # Read the file data
+            with open(file_path, 'rb') as f:
+                plaintext = f.read()
+
+            # Encrypt data with AES-256-CBC
+            cipher = Cipher(
+                algorithms.AES(aes_key),
+                modes.CBC(iv),
+                backend=self.backend
+            )
+            encryptor = cipher.encryptor()
+
+            # Apply PKCS7 padding
+            padded_data = self._apply_padding(plaintext)
+            ciphertext = encryptor.update(padded_data) + encryptor.finalize()
+
+            # Encrypt the AES key with RSA public key
+            encrypted_aes_key = self.public_key.encrypt(
+                aes_key,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+
+            # Create output file path
+            if output_path is None:
+                output_path = file_path + '.encrypted'
+
+            # Write encrypted file structure:
+            # [Encrypted AES Key Length (4 bytes)] + [Encrypted AES Key] + [IV (16 bytes)] + [Ciphertext]
+            with open(output_path, 'wb') as f:
+                # Write length of encrypted AES key
+                key_length = len(encrypted_aes_key)
+                f.write(key_length.to_bytes(4, byteorder='big'))
+                # Write encrypted AES key
+                f.write(encrypted_aes_key)
+                # Write IV
+                f.write(iv)
+                # Write encrypted data
+                f.write(ciphertext)
+
+            return output_path
+
+        except Exception as e:
+            raise Exception(f"Encryption failed: {str(e)}")
+
+    def decrypt_file(self, file_path, output_path=None):
+        """
+        Decrypt a file encrypted with hybrid encryption.
+
+        Args:
+            file_path: Path to encrypted file
+            output_path: Path for decrypted output file
+
+        Returns:
+            str: Path to decrypted file
+        """
+        try:
+            # Read encrypted file
+            with open(file_path, 'rb') as f:
+                # Read encrypted AES key length
+                key_length = int.from_bytes(f.read(4), byteorder='big')
+                # Read encrypted AES key
+                encrypted_aes_key = f.read(key_length)
+                # Read IV
+                iv = f.read(16)
+                # Read ciphertext
+                ciphertext = f.read()
+
+            # Decrypt AES key using RSA private key
+            aes_key = self.private_key.decrypt(
+                encrypted_aes_key,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+
+            # Decrypt data with AES-256
+            cipher = Cipher(
+                algorithms.AES(aes_key),
+                modes.CBC(iv),
+                backend=self.backend
+            )
+            decryptor = cipher.decryptor()
+            padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+
+            # Remove padding
+            plaintext = self._remove_padding(padded_plaintext)
+
+            # Create output file path with clear naming convention
+            if output_path is None:
+                # Get directory and filename
+                directory = os.path.dirname(file_path)
+                filename = os.path.basename(file_path)
+
+                # Remove .encrypted extension if present
+                if filename.endswith('.encrypted'):
+                    base_name = filename[:-10]  # Remove '.encrypted'
+                    # Add .decrypted before the original extension
+                    name_parts = base_name.rsplit('.', 1)
+                    if len(name_parts) > 1:
+                        # Has extension: filename.ext becomes filename.decrypted.ext
+                        output_filename = f"{name_parts[0]}.decrypted.{name_parts[1]}"
+                    else:
+                        # No extension: filename becomes filename.decrypted
+                        output_filename = f"{base_name}.decrypted"
+                else:
+                    # If doesn't end with .encrypted, add .decrypted
+                    output_filename = filename + '.decrypted'
+
+                output_path = os.path.join(directory, output_filename)
+
+            # Write decrypted file
+            with open(output_path, 'wb') as f:
+                f.write(plaintext)
+
+            return output_path
+
+        except Exception as e:
+            raise Exception(f"Decryption failed: {str(e)}")
+
+    @staticmethod
+    def _apply_padding(data):
+        """Apply PKCS7 padding to data."""
+        padding_length = 16 - (len(data) % 16)
+        padding_bytes = bytes([padding_length] * padding_length)
+        return data + padding_bytes
+
+    @staticmethod
+    def _remove_padding(data):
+        """Remove PKCS7 padding from data."""
+        padding_length = data[-1]
+        return data[:-padding_length]
+
+    def save_keys(self, private_key_path='private_key.pem', public_key_path='public_key.pem'):
+        """Save RSA keys to files."""
+        # Save private key
+        pem_private = self.private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+        with open(private_key_path, 'wb') as f:
+            f.write(pem_private)
+
+        # Save public key
+        pem_public = self.public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        with open(public_key_path, 'wb') as f:
+            f.write(pem_public)
+
+
+class FileEncryptionGUI:
+    """GUI application for file encryption tool."""
+
+    def __init__(self, root):
+        """Initialize GUI."""
+        self.root = root
+        self.root.title("File Encryption Tool - Hybrid Encryption System")
+        self.root.geometry("700x500")
+        self.root.resizable(False, False)
+
+        self.encryption_tool = FileEncryptionTool()
+        self.selected_file = None
+
+        self._create_widgets()
+
+    def _create_widgets(self):
+        """Create GUI widgets."""
+        # Title
+        title_frame = tk.Frame(self.root, bg="#2c3e50", height=80)
+        title_frame.pack(fill=tk.X)
+        title_frame.pack_propagate(False)
+
+        title_label = tk.Label(
+            title_frame,
+            text="File Encryption Tool",
+            font=("Helvetica", 24, "bold"),
+            bg="#2c3e50",
+            fg="white"
+        )
+        title_label.pack(pady=20)
+
+        # Main content frame
+        content_frame = tk.Frame(self.root, bg="#ecf0f1")
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # File selection section
+        file_frame = tk.LabelFrame(
+            content_frame,
+            text="File Selection",
+            font=("Helvetica", 12, "bold"),
+            bg="#ecf0f1",
+            padx=10,
+            pady=10
+        )
+        file_frame.pack(fill=tk.X, pady=10)
+
+        self.file_label = tk.Label(
+            file_frame,
+            text="No file selected",
+            font=("Helvetica", 10),
+            bg="#ecf0f1",
+            fg="#7f8c8d"
+        )
+        self.file_label.pack(pady=5)
+
+        select_btn = tk.Button(
+            file_frame,
+            text="Select File",
+            command=self.select_file,
+            font=("Helvetica", 11),
+            bg="#3498db",
+            fg="white",
+            padx=20,
+            pady=10,
+            cursor="hand2"
+        )
+        select_btn.pack(pady=5)
+
+        # Operations section
+        ops_frame = tk.LabelFrame(
+            content_frame,
+            text="Operations",
+            font=("Helvetica", 12, "bold"),
+            bg="#ecf0f1",
+            padx=10,
+            pady=10
+        )
+        ops_frame.pack(fill=tk.X, pady=10)
+
+        button_frame = tk.Frame(ops_frame, bg="#ecf0f1")
+        button_frame.pack(pady=10)
+
+        encrypt_btn = tk.Button(
+            button_frame,
+            text="Encrypt File",
+            command=self.encrypt_file,
+            font=("Helvetica", 11, "bold"),
+            bg="#27ae60",
+            fg="white",
+            padx=30,
+            pady=15,
+            cursor="hand2"
+        )
+        encrypt_btn.pack(side=tk.LEFT, padx=10)
+
+        decrypt_btn = tk.Button(
+            button_frame,
+            text="Decrypt File",
+            command=self.decrypt_file,
+            font=("Helvetica", 11, "bold"),
+            bg="#e74c3c",
+            fg="white",
+            padx=30,
+            pady=15,
+            cursor="hand2"
+        )
+        decrypt_btn.pack(side=tk.LEFT, padx=10)
+
+        # Status section
+        status_frame = tk.LabelFrame(
+            content_frame,
+            text="Status",
+            font=("Helvetica", 12, "bold"),
+            bg="#ecf0f1",
+            padx=10,
+            pady=10
+        )
+        status_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+
+        self.status_text = tk.Text(
+            status_frame,
+            height=8,
+            font=("Courier", 9),
+            bg="white",
+            fg="#2c3e50",
+            state=tk.DISABLED
+        )
+        self.status_text.pack(fill=tk.BOTH, expand=True)
+
+        # Information label
+        info_label = tk.Label(
+            content_frame,
+            text="Using AES-256 + RSA-2048 Hybrid Encryption",
+            font=("Helvetica", 9, "italic"),
+            bg="#ecf0f1",
+            fg="#7f8c8d"
+        )
+        info_label.pack(pady=5)
+
+    def select_file(self):
+        """Handle file selection."""
+        file_path = filedialog.askopenfilename(
+            title="Select a file",
+            filetypes=[("All files", "*.*")]
+        )
+        if file_path:
+            self.selected_file = file_path
+            filename = os.path.basename(file_path)
+            self.file_label.config(text=f"Selected: {filename}", fg="#2c3e50")
+            self.log_status(f"File selected: {filename}")
+
+    def encrypt_file(self):
+        """Handle file encryption."""
+        if not self.selected_file:
+            messagebox.showwarning("No File", "Please select a file first!")
+            return
+
+        try:
+            self.log_status("Starting encryption...")
+            output_path = self.encryption_tool.encrypt_file(self.selected_file)
+            self.log_status(f"SUCCESS: File encrypted to {os.path.basename(output_path)}")
+            messagebox.showinfo("Success", f"File encrypted successfully!\n\nOutput: {output_path}")
+        except Exception as e:
+            self.log_status(f"ERROR: {str(e)}")
+            messagebox.showerror("Error", f"Encryption failed:\n{str(e)}")
+
+    def decrypt_file(self):
+        """Handle file decryption."""
+        if not self.selected_file:
+            messagebox.showwarning("No File", "Please select a file first!")
+            return
+
+        try:
+            self.log_status("Starting decryption...")
+            output_path = self.encryption_tool.decrypt_file(self.selected_file)
+            self.log_status(f"SUCCESS: File decrypted to {os.path.basename(output_path)}")
+            messagebox.showinfo("Success", f"File decrypted successfully!\n\nOutput: {output_path}")
+        except Exception as e:
+            self.log_status(f"ERROR: {str(e)}")
+            messagebox.showerror("Error", f"Decryption failed:\n{str(e)}")
+
+    def log_status(self, message):
+        """Log message to status window."""
+        self.status_text.config(state=tk.NORMAL)
+        self.status_text.insert(tk.END, f"> {message}\n")
+        self.status_text.see(tk.END)
+        self.status_text.config(state=tk.DISABLED)
+
+
+def main():
+    """Main entry point of the application."""
+    root = tk.Tk()
+    app = FileEncryptionGUI(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
