@@ -1,0 +1,8 @@
+# Ignore all .log files
+*.log
+# Ignore a folder called temp
+temp/
+# Ignore PyCharm settings
+.idea/
+# Ignore a specific file
+secret.txt
